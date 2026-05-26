@@ -79,7 +79,10 @@ async fn get_latest_version() -> Result<String> {
             }
         }
     }
-    bail!("Could not determine latest version. Check {}/releases", REPO);
+    bail!(
+        "Could not determine latest version. Check {}/releases",
+        REPO
+    );
 }
 
 fn tempdir(exe_path: &Path) -> Result<PathBuf> {
@@ -123,7 +126,8 @@ async fn download_and_verify(tmp: &Path, target: &str, version: &str) -> Result<
     }
 
     // Verify checksum: extract expected hash from .sha256 file, compare with actual
-    let expected_line = std::fs::read_to_string(&sha_path).context("failed to read checksum file")?;
+    let expected_line =
+        std::fs::read_to_string(&sha_path).context("failed to read checksum file")?;
     let expected_hash = expected_line
         .split_whitespace()
         .next()
@@ -135,10 +139,7 @@ async fn download_and_verify(tmp: &Path, target: &str, version: &str) -> Result<
         .await
         .context("failed to run sha256sum")?;
     let actual_hash = String::from_utf8_lossy(&output.stdout);
-    let actual_hash = actual_hash
-        .split_whitespace()
-        .next()
-        .unwrap_or_default();
+    let actual_hash = actual_hash.split_whitespace().next().unwrap_or_default();
 
     if actual_hash != expected_hash {
         bail!("Checksum verification failed — download may be corrupted");
