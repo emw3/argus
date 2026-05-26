@@ -15,6 +15,7 @@ Built with Rust, Ratatui, and Tokio. ~1.5MB binary, ~3MB RAM.
 - **Command palette** — `Ctrl+P` for quick actions
 - **Adaptive layout** — switches to vertical stack on narrow terminals
 - **Sudo-aware** — detects tmux sessions and service permissions correctly under sudo
+- **Self-update** — `argus update` downloads and verifies the latest release
 - **Zero config** — works out of the box, optional TOML config for customization
 
 ## Install
@@ -41,6 +42,14 @@ sudo cp target/release/argus /usr/local/bin/
 ```bash
 curl -sSfL https://raw.githubusercontent.com/emw3/argus/main/uninstall.sh | sudo sh
 ```
+
+## Update
+
+```bash
+sudo argus update
+```
+
+Downloads the latest release from GitHub, verifies the SHA-256 checksum, and replaces the binary in place. Requires write permission to the binary's directory (hence `sudo` when installed to `/usr/local/bin`).
 
 ## Usage
 
