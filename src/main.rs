@@ -383,7 +383,7 @@ async fn main() -> Result<()> {
         // -----------------------------------------------------------------------
         // Log refresh dispatch
         // -----------------------------------------------------------------------
-        if app.log_needs_refresh {
+        if app.log_needs_refresh && app.view_mode == app::ViewMode::Services {
             app.log_needs_refresh = false;
             if let Some((id, provider)) = app.selected_service_info() {
                 let _ = log_request_tx.try_send((id, provider));
