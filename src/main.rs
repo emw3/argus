@@ -6,6 +6,7 @@ mod providers;
 mod sessions;
 mod tui;
 mod ui;
+mod update;
 
 use anyhow::Result;
 use app::{App, ServiceAction};
@@ -17,7 +18,7 @@ use tokio::sync::mpsc;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    use clap::Parser;
+    use clap::{Parser, Subcommand};
 
     #[derive(Parser, Debug)]
     #[command(name = "argus", version, about = "The all-seeing VPS dashboard")]
@@ -29,9 +30,22 @@ async fn main() -> Result<()> {
         /// Path to config file (default: ~/.config/argus/config.toml)
         #[arg(long)]
         config: Option<String>,
+
+        #[command(subcommand)]
+        command: Option<Command>,
+    }
+
+    #[derive(Subcommand, Debug)]
+    enum Command {
+        /// Update argus to the latest release
+        Update,
     }
 
     let cli = Cli::parse();
+
+    if let Some(Command::Update) = cli.command {
+        return update::run().await;
+    }
 
     // Load config
     let cfg = config::Config::load(cli.config.as_deref());
