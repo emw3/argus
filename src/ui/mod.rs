@@ -328,6 +328,10 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
             Span::styled("  o           ", key_style),
             Span::styled("Open port in browser", desc_style),
         ]),
+        Line::from(vec![
+            Span::styled("  x           ", key_style),
+            Span::styled("Kill port process", desc_style),
+        ]),
         Line::from(""),
         Line::from(Span::styled("  Actions", section_style)),
         Line::from(vec![

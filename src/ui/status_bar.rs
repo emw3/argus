@@ -59,6 +59,8 @@ pub fn render(app: &App, area: Rect, buf: &mut Buffer) {
             Span::styled(" select ", desc_style),
             Span::styled(" o", key_style),
             Span::styled(" open ", desc_style),
+            Span::styled(" x", key_style),
+            Span::styled(" kill ", desc_style),
             Span::styled(" i", key_style),
             Span::styled(" info ", desc_style),
             Span::styled(" l", key_style),
