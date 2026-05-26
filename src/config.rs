@@ -75,6 +75,18 @@ impl Default for SessionsConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortsConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for PortsConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
@@ -85,6 +97,9 @@ pub struct Config {
 
     #[serde(default)]
     pub sessions: SessionsConfig,
+
+    #[serde(default)]
+    pub ports: PortsConfig,
 }
 
 impl Config {

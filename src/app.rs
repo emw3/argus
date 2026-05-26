@@ -23,6 +23,7 @@ pub struct PendingAction {
 pub enum ViewMode {
     Services,
     Sessions,
+    Ports,
     TmuxPreview,
 }
 
@@ -105,6 +106,12 @@ pub struct App {
     pub search_query: String,
     pub palette_query: String,
     pub palette_selected: usize,
+    pub ports: Vec<crate::ports::PortInfo>,
+    pub port_selected: usize,
+    pub port_search_active: bool,
+    pub port_search_query: String,
+    pub port_log_needs_refresh: bool,
+    pub open_port_requested: bool,
 }
 
 impl App {
@@ -136,6 +143,12 @@ impl App {
             search_query: String::new(),
             palette_query: String::new(),
             palette_selected: 0,
+            ports: Vec::new(),
+            port_selected: 0,
+            port_search_active: false,
+            port_search_query: String::new(),
+            port_log_needs_refresh: false,
+            open_port_requested: false,
         }
     }
 
@@ -157,6 +170,31 @@ impl App {
                 }
             })
             .collect()
+    }
+
+    pub fn filtered_ports(&self) -> Vec<&crate::ports::PortInfo> {
+        let query = self.port_search_query.to_lowercase();
+        self.ports
+            .iter()
+            .filter(|p| {
+                if query.is_empty() {
+                    true
+                } else {
+                    p.process_name.to_lowercase().contains(&query)
+                        || p.cmdline.to_lowercase().contains(&query)
+                        || p.port.to_string().contains(&query)
+                }
+            })
+            .collect()
+    }
+
+    pub fn selected_port_info(&self) -> Option<&crate::ports::PortInfo> {
+        let ports = self.filtered_ports();
+        if ports.is_empty() {
+            return None;
+        }
+        let idx = self.port_selected.min(ports.len() - 1);
+        Some(ports[idx])
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) {
@@ -215,7 +253,38 @@ impl App {
             return;
         }
 
-        // 2. Search mode handling
+        // 2a. Port search mode handling
+        if self.port_search_active {
+            match key.code {
+                KeyCode::Esc => {
+                    self.port_search_active = false;
+                    self.port_search_query.clear();
+                    self.port_selected = 0;
+                }
+                KeyCode::Enter => {
+                    self.port_search_active = false;
+                    self.port_log_needs_refresh = true;
+                }
+                KeyCode::Backspace => {
+                    self.port_search_query.pop();
+                    self.port_selected = 0;
+                }
+                KeyCode::Char(c) => {
+                    self.port_search_query.push(c);
+                    self.port_selected = 0;
+                }
+                _ => {}
+            }
+            let len = self.filtered_ports().len();
+            if len == 0 {
+                self.port_selected = 0;
+            } else {
+                self.port_selected = self.port_selected.min(len - 1);
+            }
+            return;
+        }
+
+        // 2b. Service search mode handling
         if self.search_active {
             match key.code {
                 KeyCode::Esc => {
@@ -237,7 +306,6 @@ impl App {
                 }
                 _ => {}
             }
-            // Clamp after search changes
             let len = self.filtered_services().len();
             if len == 0 {
                 self.selected_index = 0;
@@ -262,12 +330,65 @@ impl App {
             return;
         }
 
-        // 4. Sessions view navigation
-        if self.view_mode == ViewMode::Sessions {
+        // 4a. Ports view navigation
+        if self.view_mode == ViewMode::Ports {
             match key.code {
                 KeyCode::Char('q') => self.running = false,
                 KeyCode::Char('?') => self.overlay = Overlay::Help,
                 KeyCode::Tab => self.view_mode = ViewMode::Services,
+                KeyCode::BackTab => self.toggle_pane(),
+                KeyCode::Char('/') => {
+                    self.port_search_active = true;
+                    self.port_search_query.clear();
+                }
+                KeyCode::Char('j') | KeyCode::Down => {
+                    self.port_selected = self.port_selected.saturating_add(1);
+                    let len = self.filtered_ports().len();
+                    if len > 0 {
+                        self.port_selected = self.port_selected.min(len - 1);
+                    }
+                    self.port_log_needs_refresh = true;
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    self.port_selected = self.port_selected.saturating_sub(1);
+                    self.port_log_needs_refresh = true;
+                }
+                KeyCode::Char('g') => {
+                    self.port_selected = 0;
+                    self.port_log_needs_refresh = true;
+                }
+                KeyCode::Char('G') => {
+                    let len = self.filtered_ports().len();
+                    self.port_selected = len.saturating_sub(1);
+                    self.port_log_needs_refresh = true;
+                }
+                KeyCode::Char('i') => self.detail_tab = DetailTab::Info,
+                KeyCode::Char('l') => {
+                    self.detail_tab = DetailTab::Logs;
+                    self.port_log_needs_refresh = true;
+                }
+                KeyCode::Char(' ') if self.detail_tab == DetailTab::Logs => {
+                    self.log_auto_scroll = !self.log_auto_scroll;
+                }
+                KeyCode::Char('o') => {
+                    self.open_port_requested = true;
+                }
+                KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.overlay = Overlay::Palette;
+                    self.palette_query.clear();
+                    self.palette_selected = 0;
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        // 4b. Sessions view navigation
+        if self.view_mode == ViewMode::Sessions {
+            match key.code {
+                KeyCode::Char('q') => self.running = false,
+                KeyCode::Char('?') => self.overlay = Overlay::Help,
+                KeyCode::Tab => self.view_mode = ViewMode::Ports,
                 KeyCode::Char('j') | KeyCode::Down => {
                     self.session_cursor = self.session_cursor.saturating_add(1);
                     self.clamp_session_cursor();
@@ -317,10 +438,7 @@ impl App {
                 self.log_needs_refresh = true;
             }
             KeyCode::Tab => {
-                self.view_mode = match self.view_mode {
-                    ViewMode::Services => ViewMode::Sessions,
-                    ViewMode::Sessions | ViewMode::TmuxPreview => ViewMode::Services,
-                };
+                self.view_mode = ViewMode::Sessions;
             }
             KeyCode::BackTab => self.toggle_pane(),
             KeyCode::Char('1') => {
@@ -492,6 +610,8 @@ impl App {
             ("restart", "Restart selected service"),
             ("logs", "View logs for selected service"),
             ("sessions", "Switch to sessions view"),
+            ("ports", "Switch to ports view"),
+            ("open", "Open selected port in browser"),
             ("services", "Switch to services view"),
             ("filter:all", "Show all services [1]"),
             ("filter:systemd", "Show systemd services [2]"),
@@ -563,6 +683,12 @@ impl App {
             }
             "sessions" => {
                 self.view_mode = ViewMode::Sessions;
+            }
+            "ports" => {
+                self.view_mode = ViewMode::Ports;
+            }
+            "open" if self.view_mode == ViewMode::Ports => {
+                self.open_port_requested = true;
             }
             "services" => {
                 self.view_mode = ViewMode::Services;
