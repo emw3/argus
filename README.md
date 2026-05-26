@@ -1,6 +1,6 @@
 # argus
 
-The all-seeing VPS dashboard. Monitor services, sessions, and system metrics from a single terminal.
+A terminal dashboard that watches your services, sessions, and system metrics.
 
 Built with Rust, Ratatui, and Tokio. ~1.5MB binary, ~3MB RAM.
 

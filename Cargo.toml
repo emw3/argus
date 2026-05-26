@@ -2,7 +2,7 @@
 name = "argus"
 version = "0.1.0"
 edition = "2021"
-description = "A keyboard-first TUI dashboard for VPS monitoring and service management"
+description = "A terminal dashboard that watches your services, sessions, and system metrics"
 license = "MIT"
 keywords = ["tui", "dashboard", "monitoring", "systemd", "docker"]
 categories = ["command-line-utilities"]
