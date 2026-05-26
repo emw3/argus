@@ -11,7 +11,13 @@ use crate::app::{App, ServiceAction};
 use super::centered_rect;
 
 pub fn render(app: &App, area: Rect, buf: &mut Buffer) {
-    let (verb, service_name, border_color) = if let Some(pa) = &app.pending_action {
+    let (verb, target_name, border_color) = if let Some(pk) = &app.pending_port_kill {
+        (
+            "Kill",
+            format!("{} (:{}, pid {})", pk.process_name, pk.port, pk.pid),
+            Color::Red,
+        )
+    } else if let Some(pa) = &app.pending_action {
         let verb = match pa.action {
             ServiceAction::Stop => "Stop",
             ServiceAction::Restart => "Restart",
@@ -28,7 +34,6 @@ pub fn render(app: &App, area: Rect, buf: &mut Buffer) {
         };
         (verb, pa.service_name.clone(), color)
     } else {
-        // Fallback: should not normally happen when overlay==Confirm
         let services = app.filtered_services();
         let name = if services.is_empty() {
             "this service".to_string()
@@ -63,7 +68,7 @@ pub fn render(app: &App, area: Rect, buf: &mut Buffer) {
         Line::from(vec![
             Span::raw(format!("  {} ", verb)),
             Span::styled(
-                &service_name,
+                &target_name,
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),

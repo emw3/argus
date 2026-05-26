@@ -462,6 +462,36 @@ async fn main() -> Result<()> {
         }
 
         // -----------------------------------------------------------------------
+        // Port kill dispatch
+        // -----------------------------------------------------------------------
+        if app.kill_port_requested {
+            app.kill_port_requested = false;
+            if let Some(pk) = app.pending_port_kill.take() {
+                let action_tx = action_result_tx.clone();
+                tokio::spawn(async move {
+                    let result = tokio::process::Command::new("kill")
+                        .arg(pk.pid.to_string())
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::piped())
+                        .output()
+                        .await;
+                    let (message, is_error) = match result {
+                        Ok(o) if o.status.success() => {
+                            (format!("Killed {} (:{}, pid {})", pk.process_name, pk.port, pk.pid), false)
+                        }
+                        Ok(o) => {
+                            let stderr = String::from_utf8_lossy(&o.stderr);
+                            (format!("Failed to kill pid {}: {}", pk.pid, stderr.trim()), true)
+                        }
+                        Err(e) => (format!("Failed to kill pid {}: {}", pk.pid, e), true),
+                    };
+                    let _ = action_tx.send(ActionResult { message, is_error }).await;
+                });
+            }
+        }
+
+        // -----------------------------------------------------------------------
         // Service control dispatch (runs after select!, before running check)
         // -----------------------------------------------------------------------
         if app.confirm_pending {

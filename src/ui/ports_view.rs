@@ -336,6 +336,10 @@ fn render_actions(area: Rect, buf: &mut Buffer) {
             Span::styled("Open port in browser", desc_style),
         ]),
         Line::from(vec![
+            Span::styled("  x ", label_style),
+            Span::styled("Kill port process", desc_style),
+        ]),
+        Line::from(vec![
             Span::styled("  / ", label_style),
             Span::styled("Search ports", desc_style),
         ]),

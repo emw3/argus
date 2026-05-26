@@ -112,6 +112,15 @@ pub struct App {
     pub port_search_query: String,
     pub port_log_needs_refresh: bool,
     pub open_port_requested: bool,
+    pub kill_port_requested: bool,
+    pub pending_port_kill: Option<PendingPortKill>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingPortKill {
+    pub pid: u32,
+    pub process_name: String,
+    pub port: u16,
 }
 
 impl App {
@@ -149,6 +158,8 @@ impl App {
             port_search_query: String::new(),
             port_log_needs_refresh: false,
             open_port_requested: false,
+            kill_port_requested: false,
+            pending_port_kill: None,
         }
     }
 
@@ -205,9 +216,14 @@ impl App {
                     KeyCode::Esc => {
                         self.overlay = Overlay::None;
                         self.pending_action = None;
+                        self.pending_port_kill = None;
                     }
                     KeyCode::Enter => {
-                        self.confirm_pending = true;
+                        if self.pending_port_kill.is_some() {
+                            self.kill_port_requested = true;
+                        } else {
+                            self.confirm_pending = true;
+                        }
                         self.overlay = Overlay::None;
                     }
                     _ => {}
@@ -372,6 +388,18 @@ impl App {
                 }
                 KeyCode::Char('o') => {
                     self.open_port_requested = true;
+                }
+                KeyCode::Char('x') => {
+                    if let Some(port) = self.selected_port_info() {
+                        if let Some(pid) = port.pid {
+                            self.pending_port_kill = Some(PendingPortKill {
+                                pid,
+                                process_name: port.process_name.clone(),
+                                port: port.port,
+                            });
+                            self.overlay = Overlay::Confirm;
+                        }
+                    }
                 }
                 KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     self.overlay = Overlay::Palette;
@@ -612,6 +640,7 @@ impl App {
             ("sessions", "Switch to sessions view"),
             ("ports", "Switch to ports view"),
             ("open", "Open selected port in browser"),
+            ("kill", "Kill selected port process"),
             ("services", "Switch to services view"),
             ("filter:all", "Show all services [1]"),
             ("filter:systemd", "Show systemd services [2]"),
@@ -689,6 +718,18 @@ impl App {
             }
             "open" if self.view_mode == ViewMode::Ports => {
                 self.open_port_requested = true;
+            }
+            "kill" if self.view_mode == ViewMode::Ports => {
+                if let Some(port) = self.selected_port_info() {
+                    if let Some(pid) = port.pid {
+                        self.pending_port_kill = Some(PendingPortKill {
+                            pid,
+                            process_name: port.process_name.clone(),
+                            port: port.port,
+                        });
+                        self.overlay = Overlay::Confirm;
+                    }
+                }
             }
             "services" => {
                 self.view_mode = ViewMode::Services;
