@@ -392,22 +392,36 @@ async fn main() -> Result<()> {
                 let url = format!("{}://localhost:{}", scheme, port);
                 let action_tx = action_result_tx.clone();
                 tokio::spawn(async move {
-                    let cmd = if std::env::var("WSL_DISTRO_NAME").is_ok() {
-                        "wslview"
+                    let candidates: &[&str] = &[
+                        "/usr/bin/wslview",
+                        "/usr/bin/xdg-open",
+                        "/mnt/c/Windows/explorer.exe",
+                        "/usr/bin/sensible-browser",
+                        "/usr/bin/x-www-browser",
+                        "open",
+                    ];
+                    let cmd = candidates
+                        .iter()
+                        .find(|c| std::path::Path::new(c).exists())
+                        .copied();
+                    let (message, is_error) = if let Some(cmd) = cmd {
+                        let result = tokio::process::Command::new(cmd)
+                            .arg(&url)
+                            .stdin(std::process::Stdio::null())
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .status()
+                            .await;
+                        let is_explorer = cmd.ends_with("explorer.exe");
+                        match result {
+                            // explorer.exe returns exit code 1 even on success
+                            Ok(_) if is_explorer => (format!("Opened {}", url), false),
+                            Ok(s) if s.success() => (format!("Opened {}", url), false),
+                            Ok(_) => (format!("Failed to open {}", url), true),
+                            Err(e) => (format!("Failed to open {}: {}", url, e), true),
+                        }
                     } else {
-                        "xdg-open"
-                    };
-                    let result = tokio::process::Command::new(cmd)
-                        .arg(&url)
-                        .stdin(std::process::Stdio::null())
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .status()
-                        .await;
-                    let (message, is_error) = match result {
-                        Ok(s) if s.success() => (format!("Opened {}", url), false),
-                        Ok(_) => (format!("Failed to open {}", url), true),
-                        Err(e) => (format!("Failed to open {}: {}", url, e), true),
+                        (format!("No browser found to open {}", url), true)
                     };
                     let _ = action_tx
                         .send(ActionResult { message, is_error })
