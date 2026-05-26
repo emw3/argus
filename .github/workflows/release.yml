@@ -64,17 +64,11 @@ jobs:
         with:
           path: artifacts/
       - name: Extract changelog
-        id: changelog
         run: |
           VERSION=${GITHUB_REF_NAME#v}
-          BODY=$(awk "/^## \\[${VERSION}\\]/{found=1; next} /^## \\[/{if(found) exit} found" CHANGELOG.md)
-          {
-            echo "body<<CHANGELOG_EOF"
-            echo "$BODY"
-            echo "CHANGELOG_EOF"
-          } >> "$GITHUB_OUTPUT"
+          awk "/^## \\[${VERSION}\\]/{found=1; next} /^## \\[/{if(found) exit} found" CHANGELOG.md > RELEASE_BODY.md
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: "artifacts/**/*"
-          body: ${{ steps.changelog.outputs.body }}
+          body_path: RELEASE_BODY.md
