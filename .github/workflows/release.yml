@@ -1,0 +1,69 @@
+name: Release
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            use_cross: false
+          - target: aarch64-unknown-linux-musl
+            use_cross: true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install musl tools
+        if: ${{ !matrix.use_cross }}
+        run: sudo apt-get install -y musl-tools
+      - name: Install cross
+        if: ${{ matrix.use_cross }}
+        run: cargo install cross --locked
+      - name: Add target
+        run: rustup target add ${{ matrix.target }}
+      - name: Build
+        run: |
+          if [ "${{ matrix.use_cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
+      - name: Package
+        run: |
+          VERSION=${GITHUB_REF_NAME}
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/argus dist/
+
+          # Versioned tarball
+          VNAME="argus-${{ matrix.target }}-${VERSION}"
+          tar -czf dist/${VNAME}.tar.gz -C dist argus
+          sha256sum dist/${VNAME}.tar.gz > dist/${VNAME}.tar.gz.sha256
+
+          # Versionless tarball (for curl install latest)
+          LNAME="argus-${{ matrix.target }}"
+          cp dist/${VNAME}.tar.gz dist/${LNAME}.tar.gz
+          sha256sum dist/${LNAME}.tar.gz > dist/${LNAME}.tar.gz.sha256
+      - name: Remove raw binary from dist
+        run: rm -f dist/argus
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: "artifacts/**/*"
+          generate_release_notes: true
