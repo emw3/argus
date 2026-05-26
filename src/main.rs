@@ -97,36 +97,67 @@ async fn main() -> Result<()> {
         use tokio::process::Command;
 
         while let Some(pid) = port_log_request_rx.recv().await {
-            let output = Command::new("journalctl")
+            // Try journalctl first
+            let mut entries: Vec<LogEntry> = Vec::new();
+            if let Ok(o) = Command::new("journalctl")
                 .args(["--no-pager", "-n", "50", &format!("_PID={}", pid)])
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::null())
                 .output()
-                .await;
+                .await
+            {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                entries = stdout
+                    .lines()
+                    .filter(|l| !l.is_empty() && !l.starts_with("-- "))
+                    .map(|line| {
+                        let (timestamp, message) = if line.len() > 15 {
+                            (line[..15].to_string(), line[16..].to_string())
+                        } else {
+                            (String::new(), line.to_string())
+                        };
+                        LogEntry {
+                            timestamp,
+                            level: LogLevel::Info,
+                            message,
+                        }
+                    })
+                    .collect();
+            }
 
-            let entries = match output {
-                Ok(o) => {
-                    let stdout = String::from_utf8_lossy(&o.stdout);
-                    stdout
-                        .lines()
-                        .filter(|l| !l.is_empty() && !l.starts_with("-- "))
-                        .map(|line| {
-                            let (timestamp, message) = if line.len() > 15 {
-                                (line[..15].to_string(), line[16..].to_string())
-                            } else {
-                                (String::new(), line.to_string())
-                            };
-                            LogEntry {
-                                timestamp,
-                                level: LogLevel::Info,
-                                message,
+            // Fallback: read process stdout/stderr via /proc
+            if entries.is_empty() {
+                for fd in [1u8, 2] {
+                    let fd_path = format!("/proc/{}/fd/{}", pid, fd);
+                    let link = tokio::fs::read_link(&fd_path).await;
+                    if let Ok(target) = link {
+                        let target_str = target.to_string_lossy();
+                        // Only read regular files (including deleted), skip pipes/sockets/ptys
+                        if target_str.contains("/dev/") || target_str.starts_with("pipe:") || target_str.starts_with("socket:") {
+                            continue;
+                        }
+                        if let Ok(data) = tokio::fs::read(&fd_path).await {
+                            let text = String::from_utf8_lossy(&data);
+                            let lines: Vec<&str> = text.lines().collect();
+                            let start = lines.len().saturating_sub(50);
+                            for line in &lines[start..] {
+                                if !line.is_empty() {
+                                    entries.push(LogEntry {
+                                        timestamp: String::new(),
+                                        level: LogLevel::Info,
+                                        message: line.to_string(),
+                                    });
+                                }
                             }
-                        })
-                        .collect()
+                            if !entries.is_empty() {
+                                break;
+                            }
+                        }
+                    }
                 }
-                Err(_) => Vec::new(),
-            };
+            }
+
             let _ = log_tx_for_ports.send(entries).await;
         }
     });
