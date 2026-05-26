@@ -22,7 +22,7 @@ Built with Rust, Ratatui, and Tokio. ~1.5MB binary, ~3MB RAM.
 ### Quick install
 
 ```bash
-curl -sSfL https://raw.githubusercontent.com/emw3/argus/main/install.sh | sh
+curl -sSfL https://raw.githubusercontent.com/emw3/argus/main/install.sh | sudo sh
 ```
 
 ### From source
@@ -39,7 +39,7 @@ sudo cp target/release/argus /usr/local/bin/
 ## Uninstall
 
 ```bash
-curl -sSfL https://raw.githubusercontent.com/emw3/argus/main/uninstall.sh | sh
+curl -sSfL https://raw.githubusercontent.com/emw3/argus/main/uninstall.sh | sudo sh
 ```
 
 ## Usage
