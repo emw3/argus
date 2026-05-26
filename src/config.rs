@@ -126,3 +126,178 @@ fn default_config_path() -> PathBuf {
         .join("argus")
         .join("config.toml")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_config() {
+        let cfg = Config::default();
+        assert_eq!(cfg.general.refresh_interval_ms, 2000);
+        assert_eq!(cfg.general.default_filter, "all");
+        assert!(cfg.providers.systemd);
+        assert!(cfg.providers.docker);
+        assert!(cfg.providers.pm2);
+        assert!(cfg.sessions.ssh);
+        assert!(cfg.sessions.tmux);
+        assert!(cfg.sessions.claude);
+        assert!(cfg.ports.enabled);
+    }
+
+    #[test]
+    fn empty_toml_uses_defaults() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(cfg.general.refresh_interval_ms, 2000);
+        assert_eq!(cfg.general.default_filter, "all");
+        assert!(cfg.providers.systemd);
+        assert!(cfg.ports.enabled);
+    }
+
+    #[test]
+    fn partial_toml_general_only() {
+        let toml = r#"
+[general]
+refresh_interval_ms = 5000
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.general.refresh_interval_ms, 5000);
+        assert_eq!(cfg.general.default_filter, "all"); // default
+        assert!(cfg.providers.systemd); // defaults
+        assert!(cfg.ports.enabled); // defaults
+    }
+
+    #[test]
+    fn ports_disabled() {
+        let toml = r#"
+[ports]
+enabled = false
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!(!cfg.ports.enabled);
+        // Other sections default
+        assert_eq!(cfg.general.refresh_interval_ms, 2000);
+        assert!(cfg.providers.systemd);
+    }
+
+    #[test]
+    fn ports_section_empty_defaults_enabled() {
+        // Bare [ports] section with no keys -> enabled defaults to true
+        let toml = r#"
+[ports]
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!(cfg.ports.enabled);
+    }
+
+    #[test]
+    fn providers_partial() {
+        let toml = r#"
+[providers]
+docker = false
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!(cfg.providers.systemd); // defaults to true
+        assert!(!cfg.providers.docker);
+        assert!(cfg.providers.pm2); // defaults to true
+    }
+
+    #[test]
+    fn sessions_partial() {
+        let toml = r#"
+[sessions]
+claude = false
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!(cfg.sessions.ssh);
+        assert!(cfg.sessions.tmux);
+        assert!(!cfg.sessions.claude);
+    }
+
+    #[test]
+    fn full_toml() {
+        let toml = r#"
+[general]
+refresh_interval_ms = 1000
+default_filter = "systemd"
+
+[providers]
+systemd = true
+docker = false
+pm2 = false
+
+[sessions]
+ssh = true
+tmux = false
+claude = true
+
+[ports]
+enabled = false
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.general.refresh_interval_ms, 1000);
+        assert_eq!(cfg.general.default_filter, "systemd");
+        assert!(cfg.providers.systemd);
+        assert!(!cfg.providers.docker);
+        assert!(!cfg.providers.pm2);
+        assert!(cfg.sessions.ssh);
+        assert!(!cfg.sessions.tmux);
+        assert!(cfg.sessions.claude);
+        assert!(!cfg.ports.enabled);
+    }
+
+    #[test]
+    fn load_missing_file_returns_default() {
+        let cfg = Config::load(Some("/tmp/argus_test_nonexistent_config.toml"));
+        assert_eq!(cfg.general.refresh_interval_ms, 2000);
+        assert!(cfg.ports.enabled);
+    }
+
+    #[test]
+    fn load_from_temp_file() {
+        let path = "/tmp/argus_test_config.toml";
+        std::fs::write(
+            path,
+            r#"
+[general]
+refresh_interval_ms = 500
+
+[ports]
+enabled = false
+"#,
+        )
+        .unwrap();
+
+        let cfg = Config::load(Some(path));
+        assert_eq!(cfg.general.refresh_interval_ms, 500);
+        assert!(!cfg.ports.enabled);
+        assert!(cfg.providers.systemd); // default
+
+        // Cleanup
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn load_invalid_toml_returns_default() {
+        let path = "/tmp/argus_test_bad_config.toml";
+        std::fs::write(path, "this is not valid toml {{{").unwrap();
+
+        let cfg = Config::load(Some(path));
+        assert_eq!(cfg.general.refresh_interval_ms, 2000); // default
+        assert!(cfg.ports.enabled); // default
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn config_roundtrip_serialize_deserialize() {
+        let cfg = Config::default();
+        let toml_str = toml::to_string(&cfg).unwrap();
+        let cfg2: Config = toml::from_str(&toml_str).unwrap();
+        assert_eq!(
+            cfg2.general.refresh_interval_ms,
+            cfg.general.refresh_interval_ms
+        );
+        assert_eq!(cfg2.ports.enabled, cfg.ports.enabled);
+    }
+}
