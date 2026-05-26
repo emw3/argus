@@ -2,6 +2,7 @@ mod app;
 mod config;
 mod event;
 mod metrics;
+mod ports;
 mod providers;
 mod sessions;
 mod tui;
@@ -64,6 +65,7 @@ async fn main() -> Result<()> {
     // Log fetcher: on-demand per-service log fetching
     // -----------------------------------------------------------------------
     let (log_tx, mut log_rx) = mpsc::channel::<Vec<LogEntry>>(4);
+    let log_tx_for_services = log_tx.clone();
     let (log_request_tx, mut log_request_rx) = mpsc::channel::<(String, ProviderType)>(4);
 
     tokio::spawn(async move {
@@ -79,10 +81,57 @@ async fn main() -> Result<()> {
                 ProviderType::Pm2 => Pm2Provider::new().logs(&id, 50).await,
             };
             if let Ok(entries) = entries {
-                let _ = log_tx.send(entries).await;
+                let _ = log_tx_for_services.send(entries).await;
             }
         }
     });
+
+    // -----------------------------------------------------------------------
+    // Port log fetcher: on-demand per-PID log fetching via journalctl
+    // -----------------------------------------------------------------------
+    let log_tx_for_ports = log_tx.clone();
+    let (port_log_request_tx, mut port_log_request_rx) = mpsc::channel::<u32>(4);
+
+    tokio::spawn(async move {
+        use providers::LogLevel;
+        use tokio::process::Command;
+
+        while let Some(pid) = port_log_request_rx.recv().await {
+            let output = Command::new("journalctl")
+                .args(["--no-pager", "-n", "50", &format!("_PID={}", pid)])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .output()
+                .await;
+
+            let entries = match output {
+                Ok(o) => {
+                    let stdout = String::from_utf8_lossy(&o.stdout);
+                    stdout
+                        .lines()
+                        .filter(|l| !l.is_empty() && !l.starts_with("-- "))
+                        .map(|line| {
+                            let (timestamp, message) = if line.len() > 15 {
+                                (line[..15].to_string(), line[16..].to_string())
+                            } else {
+                                (String::new(), line.to_string())
+                            };
+                            LogEntry {
+                                timestamp,
+                                level: LogLevel::Info,
+                                message,
+                            }
+                        })
+                        .collect()
+                }
+                Err(_) => Vec::new(),
+            };
+            let _ = log_tx_for_ports.send(entries).await;
+        }
+    });
+
+    drop(log_tx);
 
     // -----------------------------------------------------------------------
     // Metrics poller: every 2 seconds
@@ -186,6 +235,22 @@ async fn main() -> Result<()> {
     });
 
     // -----------------------------------------------------------------------
+    // Ports poller: configurable interval
+    // -----------------------------------------------------------------------
+    let ports_refresh_ms = cfg.general.refresh_interval_ms * 2;
+    let (ports_tx, mut ports_rx) = mpsc::channel::<Vec<ports::PortInfo>>(1);
+    if cfg.ports.enabled {
+        tokio::spawn(async move {
+            use tokio::time::Duration;
+            loop {
+                let port_list = ports::scan().await;
+                let _ = ports_tx.send(port_list).await;
+                tokio::time::sleep(Duration::from_millis(ports_refresh_ms)).await;
+            }
+        });
+    }
+
+    // -----------------------------------------------------------------------
     // Action result channel: receives success/error from service actions
     // -----------------------------------------------------------------------
     let (action_result_tx, mut action_result_rx) = mpsc::channel::<ActionResult>(4);
@@ -246,6 +311,17 @@ async fn main() -> Result<()> {
                 app.sessions = sess;
             }
 
+            // Ports update
+            Some(port_list) = ports_rx.recv() => {
+                app.ports = port_list;
+                let len = app.filtered_ports().len();
+                if len == 0 {
+                    app.port_selected = 0;
+                } else {
+                    app.port_selected = app.port_selected.min(len - 1);
+                }
+            }
+
             // Log entries received from fetcher
             Some(entries) = log_rx.recv() => {
                 app.logs = entries;
@@ -280,6 +356,63 @@ async fn main() -> Result<()> {
             app.log_needs_refresh = false;
             if let Some((id, provider)) = app.selected_service_info() {
                 let _ = log_request_tx.try_send((id, provider));
+            }
+        }
+
+        // -----------------------------------------------------------------------
+        // Port log refresh dispatch
+        // -----------------------------------------------------------------------
+        if app.port_log_needs_refresh && app.view_mode == app::ViewMode::Ports {
+            app.port_log_needs_refresh = false;
+            if let Some(port_info) = app.selected_port_info() {
+                // Check if port's process matches a managed service
+                let matched_service = port_info.pid.and_then(|pid| {
+                    app.services
+                        .iter()
+                        .find(|s| s.pid == Some(pid))
+                        .map(|s| (s.id.clone(), s.provider))
+                });
+
+                if let Some((id, provider)) = matched_service {
+                    let _ = log_request_tx.try_send((id, provider));
+                } else if let Some(pid) = port_info.pid {
+                    let _ = port_log_request_tx.try_send(pid);
+                }
+            }
+        }
+
+        // -----------------------------------------------------------------------
+        // Browser open dispatch
+        // -----------------------------------------------------------------------
+        if app.open_port_requested {
+            app.open_port_requested = false;
+            if let Some(port_info) = app.selected_port_info() {
+                let port = port_info.port;
+                let scheme = if port == 443 { "https" } else { "http" };
+                let url = format!("{}://localhost:{}", scheme, port);
+                let action_tx = action_result_tx.clone();
+                tokio::spawn(async move {
+                    let cmd = if std::env::var("WSL_DISTRO_NAME").is_ok() {
+                        "wslview"
+                    } else {
+                        "xdg-open"
+                    };
+                    let result = tokio::process::Command::new(cmd)
+                        .arg(&url)
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status()
+                        .await;
+                    let (message, is_error) = match result {
+                        Ok(s) if s.success() => (format!("Opened {}", url), false),
+                        Ok(_) => (format!("Failed to open {}", url), true),
+                        Err(e) => (format!("Failed to open {}: {}", url, e), true),
+                    };
+                    let _ = action_tx
+                        .send(ActionResult { message, is_error })
+                        .await;
+                });
             }
         }
 
