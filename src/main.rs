@@ -2,6 +2,7 @@ mod app;
 mod config;
 mod event;
 mod metrics;
+mod ports;
 mod providers;
 mod sessions;
 mod tui;
@@ -64,6 +65,7 @@ async fn main() -> Result<()> {
     // Log fetcher: on-demand per-service log fetching
     // -----------------------------------------------------------------------
     let (log_tx, mut log_rx) = mpsc::channel::<Vec<LogEntry>>(4);
+    let log_tx_for_services = log_tx.clone();
     let (log_request_tx, mut log_request_rx) = mpsc::channel::<(String, ProviderType)>(4);
 
     tokio::spawn(async move {
@@ -79,10 +81,88 @@ async fn main() -> Result<()> {
                 ProviderType::Pm2 => Pm2Provider::new().logs(&id, 50).await,
             };
             if let Ok(entries) = entries {
-                let _ = log_tx.send(entries).await;
+                let _ = log_tx_for_services.send(entries).await;
             }
         }
     });
+
+    // -----------------------------------------------------------------------
+    // Port log fetcher: on-demand per-PID log fetching via journalctl
+    // -----------------------------------------------------------------------
+    let log_tx_for_ports = log_tx.clone();
+    let (port_log_request_tx, mut port_log_request_rx) = mpsc::channel::<u32>(4);
+
+    tokio::spawn(async move {
+        use providers::LogLevel;
+        use tokio::process::Command;
+
+        while let Some(pid) = port_log_request_rx.recv().await {
+            // Try journalctl first
+            let mut entries: Vec<LogEntry> = Vec::new();
+            if let Ok(o) = Command::new("journalctl")
+                .args(["--no-pager", "-n", "50", &format!("_PID={}", pid)])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .output()
+                .await
+            {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                entries = stdout
+                    .lines()
+                    .filter(|l| !l.is_empty() && !l.starts_with("-- "))
+                    .map(|line| {
+                        let (timestamp, message) = if line.len() > 15 {
+                            (line[..15].to_string(), line[16..].to_string())
+                        } else {
+                            (String::new(), line.to_string())
+                        };
+                        LogEntry {
+                            timestamp,
+                            level: LogLevel::Info,
+                            message,
+                        }
+                    })
+                    .collect();
+            }
+
+            // Fallback: read process stdout/stderr via /proc
+            if entries.is_empty() {
+                for fd in [1u8, 2] {
+                    let fd_path = format!("/proc/{}/fd/{}", pid, fd);
+                    let link = tokio::fs::read_link(&fd_path).await;
+                    if let Ok(target) = link {
+                        let target_str = target.to_string_lossy();
+                        // Only read regular files (including deleted), skip pipes/sockets/ptys
+                        if !is_loggable_fd_target(&target_str) {
+                            continue;
+                        }
+                        if let Ok(data) = tokio::fs::read(&fd_path).await {
+                            let text = String::from_utf8_lossy(&data);
+                            let lines: Vec<&str> = text.lines().collect();
+                            let start = lines.len().saturating_sub(50);
+                            for line in &lines[start..] {
+                                if !line.is_empty() {
+                                    entries.push(LogEntry {
+                                        timestamp: String::new(),
+                                        level: LogLevel::Info,
+                                        message: line.to_string(),
+                                    });
+                                }
+                            }
+                            if !entries.is_empty() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            let _ = log_tx_for_ports.send(entries).await;
+        }
+    });
+
+    drop(log_tx);
 
     // -----------------------------------------------------------------------
     // Metrics poller: every 2 seconds
@@ -186,6 +266,22 @@ async fn main() -> Result<()> {
     });
 
     // -----------------------------------------------------------------------
+    // Ports poller: configurable interval
+    // -----------------------------------------------------------------------
+    let ports_refresh_ms = cfg.general.refresh_interval_ms * 2;
+    let (ports_tx, mut ports_rx) = mpsc::channel::<Vec<ports::PortInfo>>(1);
+    if cfg.ports.enabled {
+        tokio::spawn(async move {
+            use tokio::time::Duration;
+            loop {
+                let port_list = ports::scan().await;
+                let _ = ports_tx.send(port_list).await;
+                tokio::time::sleep(Duration::from_millis(ports_refresh_ms)).await;
+            }
+        });
+    }
+
+    // -----------------------------------------------------------------------
     // Action result channel: receives success/error from service actions
     // -----------------------------------------------------------------------
     let (action_result_tx, mut action_result_rx) = mpsc::channel::<ActionResult>(4);
@@ -246,6 +342,17 @@ async fn main() -> Result<()> {
                 app.sessions = sess;
             }
 
+            // Ports update
+            Some(port_list) = ports_rx.recv() => {
+                app.ports = port_list;
+                let len = app.filtered_ports().len();
+                if len == 0 {
+                    app.port_selected = 0;
+                } else {
+                    app.port_selected = app.port_selected.min(len - 1);
+                }
+            }
+
             // Log entries received from fetcher
             Some(entries) = log_rx.recv() => {
                 app.logs = entries;
@@ -276,10 +383,107 @@ async fn main() -> Result<()> {
         // -----------------------------------------------------------------------
         // Log refresh dispatch
         // -----------------------------------------------------------------------
-        if app.log_needs_refresh {
+        if app.log_needs_refresh && app.view_mode == app::ViewMode::Services {
             app.log_needs_refresh = false;
             if let Some((id, provider)) = app.selected_service_info() {
                 let _ = log_request_tx.try_send((id, provider));
+            }
+        }
+
+        // -----------------------------------------------------------------------
+        // Port log refresh dispatch
+        // -----------------------------------------------------------------------
+        if app.port_log_needs_refresh && app.view_mode == app::ViewMode::Ports {
+            app.port_log_needs_refresh = false;
+            if let Some(port_info) = app.selected_port_info() {
+                // Check if port's process matches a managed service
+                let matched_service = port_info.pid.and_then(|pid| {
+                    app.services
+                        .iter()
+                        .find(|s| s.pid == Some(pid))
+                        .map(|s| (s.id.clone(), s.provider))
+                });
+
+                if let Some((id, provider)) = matched_service {
+                    let _ = log_request_tx.try_send((id, provider));
+                } else if let Some(pid) = port_info.pid {
+                    let _ = port_log_request_tx.try_send(pid);
+                }
+            }
+        }
+
+        // -----------------------------------------------------------------------
+        // Browser open dispatch
+        // -----------------------------------------------------------------------
+        if app.open_port_requested {
+            app.open_port_requested = false;
+            if let Some(port_info) = app.selected_port_info() {
+                let port = port_info.port;
+                let scheme = port_url_scheme(port);
+                let url = format!("{}://localhost:{}", scheme, port);
+                let action_tx = action_result_tx.clone();
+                tokio::spawn(async move {
+                    let candidates: &[&str] = &[
+                        "/usr/bin/wslview",
+                        "/usr/bin/xdg-open",
+                        "/mnt/c/Windows/explorer.exe",
+                        "/usr/bin/sensible-browser",
+                        "/usr/bin/x-www-browser",
+                        "open",
+                    ];
+                    let cmd = pick_browser(candidates);
+                    let (message, is_error) = if let Some(cmd) = cmd {
+                        let result = tokio::process::Command::new(cmd)
+                            .arg(&url)
+                            .stdin(std::process::Stdio::null())
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .status()
+                            .await;
+                        let is_explorer = cmd.ends_with("explorer.exe");
+                        match result {
+                            Ok(s) => browser_open_result(&url, s.success(), is_explorer),
+                            Err(e) => (format!("Failed to open {}: {}", url, e), true),
+                        }
+                    } else {
+                        (format!("No browser found to open {}", url), true)
+                    };
+                    let _ = action_tx.send(ActionResult { message, is_error }).await;
+                });
+            }
+        }
+
+        // -----------------------------------------------------------------------
+        // Port kill dispatch
+        // -----------------------------------------------------------------------
+        if app.kill_port_requested {
+            app.kill_port_requested = false;
+            if let Some(pk) = app.pending_port_kill.take() {
+                let action_tx = action_result_tx.clone();
+                tokio::spawn(async move {
+                    let result = tokio::process::Command::new("kill")
+                        .arg(pk.pid.to_string())
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::piped())
+                        .output()
+                        .await;
+                    let (message, is_error) = match result {
+                        Ok(o) if o.status.success() => (
+                            format!("Killed {} (:{}, pid {})", pk.process_name, pk.port, pk.pid),
+                            false,
+                        ),
+                        Ok(o) => {
+                            let stderr = String::from_utf8_lossy(&o.stderr);
+                            (
+                                format!("Failed to kill pid {}: {}", pk.pid, stderr.trim()),
+                                true,
+                            )
+                        }
+                        Err(e) => (format!("Failed to kill pid {}: {}", pk.pid, e), true),
+                    };
+                    let _ = action_tx.send(ActionResult { message, is_error }).await;
+                });
             }
         }
 
@@ -309,6 +513,42 @@ async fn main() -> Result<()> {
 struct ActionResult {
     message: String,
     is_error: bool,
+}
+
+/// Find the first available browser command from the candidate list.
+/// Returns the path string if one exists on disk.
+fn pick_browser<'a>(candidates: &[&'a str]) -> Option<&'a str> {
+    candidates
+        .iter()
+        .find(|c| std::path::Path::new(c).exists())
+        .copied()
+}
+
+/// Determine the (message, is_error) result from a browser open attempt.
+/// `url` is the URL opened.
+/// `exit_ok` is whether the process exited successfully (status.success()).
+/// `is_explorer` is whether the command is explorer.exe (returns 1 even on success).
+fn browser_open_result(url: &str, exit_ok: bool, is_explorer: bool) -> (String, bool) {
+    if is_explorer || exit_ok {
+        (format!("Opened {}", url), false)
+    } else {
+        (format!("Failed to open {}", url), true)
+    }
+}
+
+/// Determine the URL scheme for a given port.
+fn port_url_scheme(port: u16) -> &'static str {
+    if port == 443 {
+        "https"
+    } else {
+        "http"
+    }
+}
+
+/// Check whether an fd target path should be read for log content.
+/// Returns false for /dev/ devices, pipes, and sockets (not regular files).
+fn is_loggable_fd_target(target: &str) -> bool {
+    !target.contains("/dev/") && !target.starts_with("pipe:") && !target.starts_with("socket:")
 }
 
 async fn dispatch_service_action(action: &app::PendingAction) -> ActionResult {
@@ -389,5 +629,136 @@ async fn dispatch_service_action(action: &app::PendingAction) -> ActionResult {
             message: format!("{} {} — {}", verb, action.service_name, e),
             is_error: true,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // pick_browser tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn pick_browser_returns_first_existing() {
+        // /bin/sh should exist on any Linux system
+        let candidates = &["/nonexistent/browser", "/bin/sh", "/usr/bin/env"];
+        assert_eq!(pick_browser(candidates), Some("/bin/sh"));
+    }
+
+    #[test]
+    fn pick_browser_returns_none_when_none_exist() {
+        let candidates = &["/nonexistent/a", "/nonexistent/b", "/nonexistent/c"];
+        assert_eq!(pick_browser(candidates), None);
+    }
+
+    #[test]
+    fn pick_browser_empty_candidates() {
+        let candidates: &[&str] = &[];
+        assert_eq!(pick_browser(candidates), None);
+    }
+
+    #[test]
+    fn pick_browser_first_match_wins() {
+        // Both exist, but /bin/sh comes first
+        let candidates = &["/bin/sh", "/usr/bin/env"];
+        assert_eq!(pick_browser(candidates), Some("/bin/sh"));
+    }
+
+    // -----------------------------------------------------------------------
+    // browser_open_result tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn browser_result_success() {
+        let (msg, err) = browser_open_result("http://localhost:3000", true, false);
+        assert_eq!(msg, "Opened http://localhost:3000");
+        assert!(!err);
+    }
+
+    #[test]
+    fn browser_result_failure() {
+        let (msg, err) = browser_open_result("http://localhost:3000", false, false);
+        assert_eq!(msg, "Failed to open http://localhost:3000");
+        assert!(err);
+    }
+
+    #[test]
+    fn browser_result_explorer_exe_always_success() {
+        // explorer.exe returns exit code 1 even on success
+        let (msg, err) = browser_open_result("http://localhost:3000", false, true);
+        assert_eq!(msg, "Opened http://localhost:3000");
+        assert!(!err);
+    }
+
+    #[test]
+    fn browser_result_explorer_exe_with_success_code() {
+        let (msg, err) = browser_open_result("http://localhost:3000", true, true);
+        assert_eq!(msg, "Opened http://localhost:3000");
+        assert!(!err);
+    }
+
+    // -----------------------------------------------------------------------
+    // port_url_scheme tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn url_scheme_443_is_https() {
+        assert_eq!(port_url_scheme(443), "https");
+    }
+
+    #[test]
+    fn url_scheme_80_is_http() {
+        assert_eq!(port_url_scheme(80), "http");
+    }
+
+    #[test]
+    fn url_scheme_8080_is_http() {
+        assert_eq!(port_url_scheme(8080), "http");
+    }
+
+    #[test]
+    fn url_scheme_3000_is_http() {
+        assert_eq!(port_url_scheme(3000), "http");
+    }
+
+    // -----------------------------------------------------------------------
+    // is_loggable_fd_target tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn loggable_regular_file() {
+        assert!(is_loggable_fd_target("/var/log/myapp.log"));
+    }
+
+    #[test]
+    fn loggable_deleted_file() {
+        assert!(is_loggable_fd_target("/var/log/myapp.log (deleted)"));
+    }
+
+    #[test]
+    fn not_loggable_dev_null() {
+        assert!(!is_loggable_fd_target("/dev/null"));
+    }
+
+    #[test]
+    fn not_loggable_dev_pts() {
+        assert!(!is_loggable_fd_target("/dev/pts/0"));
+    }
+
+    #[test]
+    fn not_loggable_pipe() {
+        assert!(!is_loggable_fd_target("pipe:[12345]"));
+    }
+
+    #[test]
+    fn not_loggable_socket() {
+        assert!(!is_loggable_fd_target("socket:[67890]"));
+    }
+
+    #[test]
+    fn loggable_tmp_file() {
+        assert!(is_loggable_fd_target("/tmp/output.log"));
     }
 }

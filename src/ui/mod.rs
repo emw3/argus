@@ -3,6 +3,7 @@ pub mod detail;
 pub mod log_view;
 pub mod metrics_strip;
 pub mod palette;
+pub mod ports_view;
 pub mod preview;
 pub mod service_list;
 pub mod sessions_view;
@@ -71,6 +72,28 @@ pub fn render(app: &App, frame: &mut Frame) {
 
                 frame.render_widget(ServiceListWidget { app }, main_chunks[0]);
                 frame.render_widget(DetailWidget { app }, main_chunks[1]);
+            }
+        }
+        ViewMode::Ports => {
+            let main_area = root_chunks[1];
+            let is_narrow = main_area.width < 100;
+
+            if is_narrow {
+                let main_chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+                    .split(main_area);
+
+                frame.render_widget(PortsListWidget { app }, main_chunks[0]);
+                frame.render_widget(PortsDetailWidget { app }, main_chunks[1]);
+            } else {
+                let main_chunks = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
+                    .split(main_area);
+
+                frame.render_widget(PortsListWidget { app }, main_chunks[0]);
+                frame.render_widget(PortsDetailWidget { app }, main_chunks[1]);
             }
         }
         ViewMode::Sessions => {
@@ -176,6 +199,26 @@ impl<'a> Widget for PreviewWidget<'a> {
     }
 }
 
+struct PortsListWidget<'a> {
+    app: &'a App,
+}
+
+impl<'a> Widget for PortsListWidget<'a> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        ports_view::render_list(self.app, area, buf);
+    }
+}
+
+struct PortsDetailWidget<'a> {
+    app: &'a App,
+}
+
+impl<'a> Widget for PortsDetailWidget<'a> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        ports_view::render_detail(self.app, area, buf);
+    }
+}
+
 struct PaletteWidget<'a> {
     app: &'a App,
 }
@@ -231,7 +274,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
         Line::from(Span::styled("  Views", section_style)),
         Line::from(vec![
             Span::styled("  Tab         ", key_style),
-            Span::styled("Toggle Services ↔ Sessions", desc_style),
+            Span::styled("Cycle Services → Sessions → Ports", desc_style),
         ]),
         Line::from(vec![
             Span::styled("  S-Tab       ", key_style),
@@ -278,6 +321,16 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
         Line::from(vec![
             Span::styled("  l           ", key_style),
             Span::styled("Logs tab", desc_style),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled("  Ports", section_style)),
+        Line::from(vec![
+            Span::styled("  o           ", key_style),
+            Span::styled("Open port in browser", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  x           ", key_style),
+            Span::styled("Kill port process", desc_style),
         ]),
         Line::from(""),
         Line::from(Span::styled("  Actions", section_style)),
