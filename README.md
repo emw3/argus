@@ -36,6 +36,12 @@ cargo build --release
 sudo cp target/release/argus /usr/local/bin/
 ```
 
+## Uninstall
+
+```bash
+curl -sSfL https://raw.githubusercontent.com/emw3/argus/main/uninstall.sh | sh
+```
+
 ## Usage
 
 ```bash
