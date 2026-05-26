@@ -134,10 +134,7 @@ async fn main() -> Result<()> {
                     if let Ok(target) = link {
                         let target_str = target.to_string_lossy();
                         // Only read regular files (including deleted), skip pipes/sockets/ptys
-                        if target_str.contains("/dev/")
-                            || target_str.starts_with("pipe:")
-                            || target_str.starts_with("socket:")
-                        {
+                        if !is_loggable_fd_target(&target_str) {
                             continue;
                         }
                         if let Ok(data) = tokio::fs::read(&fd_path).await {
@@ -422,7 +419,7 @@ async fn main() -> Result<()> {
             app.open_port_requested = false;
             if let Some(port_info) = app.selected_port_info() {
                 let port = port_info.port;
-                let scheme = if port == 443 { "https" } else { "http" };
+                let scheme = port_url_scheme(port);
                 let url = format!("{}://localhost:{}", scheme, port);
                 let action_tx = action_result_tx.clone();
                 tokio::spawn(async move {
@@ -434,10 +431,7 @@ async fn main() -> Result<()> {
                         "/usr/bin/x-www-browser",
                         "open",
                     ];
-                    let cmd = candidates
-                        .iter()
-                        .find(|c| std::path::Path::new(c).exists())
-                        .copied();
+                    let cmd = pick_browser(candidates);
                     let (message, is_error) = if let Some(cmd) = cmd {
                         let result = tokio::process::Command::new(cmd)
                             .arg(&url)
@@ -448,10 +442,7 @@ async fn main() -> Result<()> {
                             .await;
                         let is_explorer = cmd.ends_with("explorer.exe");
                         match result {
-                            // explorer.exe returns exit code 1 even on success
-                            Ok(_) if is_explorer => (format!("Opened {}", url), false),
-                            Ok(s) if s.success() => (format!("Opened {}", url), false),
-                            Ok(_) => (format!("Failed to open {}", url), true),
+                            Ok(s) => browser_open_result(&url, s.success(), is_explorer),
                             Err(e) => (format!("Failed to open {}: {}", url, e), true),
                         }
                     } else {
@@ -522,6 +513,42 @@ async fn main() -> Result<()> {
 struct ActionResult {
     message: String,
     is_error: bool,
+}
+
+/// Find the first available browser command from the candidate list.
+/// Returns the path string if one exists on disk.
+fn pick_browser<'a>(candidates: &[&'a str]) -> Option<&'a str> {
+    candidates
+        .iter()
+        .find(|c| std::path::Path::new(c).exists())
+        .copied()
+}
+
+/// Determine the (message, is_error) result from a browser open attempt.
+/// `url` is the URL opened.
+/// `exit_ok` is whether the process exited successfully (status.success()).
+/// `is_explorer` is whether the command is explorer.exe (returns 1 even on success).
+fn browser_open_result(url: &str, exit_ok: bool, is_explorer: bool) -> (String, bool) {
+    if is_explorer || exit_ok {
+        (format!("Opened {}", url), false)
+    } else {
+        (format!("Failed to open {}", url), true)
+    }
+}
+
+/// Determine the URL scheme for a given port.
+fn port_url_scheme(port: u16) -> &'static str {
+    if port == 443 {
+        "https"
+    } else {
+        "http"
+    }
+}
+
+/// Check whether an fd target path should be read for log content.
+/// Returns false for /dev/ devices, pipes, and sockets (not regular files).
+fn is_loggable_fd_target(target: &str) -> bool {
+    !target.contains("/dev/") && !target.starts_with("pipe:") && !target.starts_with("socket:")
 }
 
 async fn dispatch_service_action(action: &app::PendingAction) -> ActionResult {
@@ -602,5 +629,136 @@ async fn dispatch_service_action(action: &app::PendingAction) -> ActionResult {
             message: format!("{} {} — {}", verb, action.service_name, e),
             is_error: true,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // pick_browser tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn pick_browser_returns_first_existing() {
+        // /bin/sh should exist on any Linux system
+        let candidates = &["/nonexistent/browser", "/bin/sh", "/usr/bin/env"];
+        assert_eq!(pick_browser(candidates), Some("/bin/sh"));
+    }
+
+    #[test]
+    fn pick_browser_returns_none_when_none_exist() {
+        let candidates = &["/nonexistent/a", "/nonexistent/b", "/nonexistent/c"];
+        assert_eq!(pick_browser(candidates), None);
+    }
+
+    #[test]
+    fn pick_browser_empty_candidates() {
+        let candidates: &[&str] = &[];
+        assert_eq!(pick_browser(candidates), None);
+    }
+
+    #[test]
+    fn pick_browser_first_match_wins() {
+        // Both exist, but /bin/sh comes first
+        let candidates = &["/bin/sh", "/usr/bin/env"];
+        assert_eq!(pick_browser(candidates), Some("/bin/sh"));
+    }
+
+    // -----------------------------------------------------------------------
+    // browser_open_result tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn browser_result_success() {
+        let (msg, err) = browser_open_result("http://localhost:3000", true, false);
+        assert_eq!(msg, "Opened http://localhost:3000");
+        assert!(!err);
+    }
+
+    #[test]
+    fn browser_result_failure() {
+        let (msg, err) = browser_open_result("http://localhost:3000", false, false);
+        assert_eq!(msg, "Failed to open http://localhost:3000");
+        assert!(err);
+    }
+
+    #[test]
+    fn browser_result_explorer_exe_always_success() {
+        // explorer.exe returns exit code 1 even on success
+        let (msg, err) = browser_open_result("http://localhost:3000", false, true);
+        assert_eq!(msg, "Opened http://localhost:3000");
+        assert!(!err);
+    }
+
+    #[test]
+    fn browser_result_explorer_exe_with_success_code() {
+        let (msg, err) = browser_open_result("http://localhost:3000", true, true);
+        assert_eq!(msg, "Opened http://localhost:3000");
+        assert!(!err);
+    }
+
+    // -----------------------------------------------------------------------
+    // port_url_scheme tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn url_scheme_443_is_https() {
+        assert_eq!(port_url_scheme(443), "https");
+    }
+
+    #[test]
+    fn url_scheme_80_is_http() {
+        assert_eq!(port_url_scheme(80), "http");
+    }
+
+    #[test]
+    fn url_scheme_8080_is_http() {
+        assert_eq!(port_url_scheme(8080), "http");
+    }
+
+    #[test]
+    fn url_scheme_3000_is_http() {
+        assert_eq!(port_url_scheme(3000), "http");
+    }
+
+    // -----------------------------------------------------------------------
+    // is_loggable_fd_target tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn loggable_regular_file() {
+        assert!(is_loggable_fd_target("/var/log/myapp.log"));
+    }
+
+    #[test]
+    fn loggable_deleted_file() {
+        assert!(is_loggable_fd_target("/var/log/myapp.log (deleted)"));
+    }
+
+    #[test]
+    fn not_loggable_dev_null() {
+        assert!(!is_loggable_fd_target("/dev/null"));
+    }
+
+    #[test]
+    fn not_loggable_dev_pts() {
+        assert!(!is_loggable_fd_target("/dev/pts/0"));
+    }
+
+    #[test]
+    fn not_loggable_pipe() {
+        assert!(!is_loggable_fd_target("pipe:[12345]"));
+    }
+
+    #[test]
+    fn not_loggable_socket() {
+        assert!(!is_loggable_fd_target("socket:[67890]"));
+    }
+
+    #[test]
+    fn loggable_tmp_file() {
+        assert!(is_loggable_fd_target("/tmp/output.log"));
     }
 }
