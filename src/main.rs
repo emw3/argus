@@ -134,7 +134,10 @@ async fn main() -> Result<()> {
                     if let Ok(target) = link {
                         let target_str = target.to_string_lossy();
                         // Only read regular files (including deleted), skip pipes/sockets/ptys
-                        if target_str.contains("/dev/") || target_str.starts_with("pipe:") || target_str.starts_with("socket:") {
+                        if target_str.contains("/dev/")
+                            || target_str.starts_with("pipe:")
+                            || target_str.starts_with("socket:")
+                        {
                             continue;
                         }
                         if let Ok(data) = tokio::fs::read(&fd_path).await {
@@ -454,9 +457,7 @@ async fn main() -> Result<()> {
                     } else {
                         (format!("No browser found to open {}", url), true)
                     };
-                    let _ = action_tx
-                        .send(ActionResult { message, is_error })
-                        .await;
+                    let _ = action_tx.send(ActionResult { message, is_error }).await;
                 });
             }
         }
@@ -477,12 +478,16 @@ async fn main() -> Result<()> {
                         .output()
                         .await;
                     let (message, is_error) = match result {
-                        Ok(o) if o.status.success() => {
-                            (format!("Killed {} (:{}, pid {})", pk.process_name, pk.port, pk.pid), false)
-                        }
+                        Ok(o) if o.status.success() => (
+                            format!("Killed {} (:{}, pid {})", pk.process_name, pk.port, pk.pid),
+                            false,
+                        ),
                         Ok(o) => {
                             let stderr = String::from_utf8_lossy(&o.stderr);
-                            (format!("Failed to kill pid {}: {}", pk.pid, stderr.trim()), true)
+                            (
+                                format!("Failed to kill pid {}: {}", pk.pid, stderr.trim()),
+                                true,
+                            )
                         }
                         Err(e) => (format!("Failed to kill pid {}: {}", pk.pid, e), true),
                     };

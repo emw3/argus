@@ -101,10 +101,7 @@ fn render_port_list(app: &App, area: Rect, buf: &mut Buffer) {
             };
 
             let line = Line::from(vec![
-                Span::styled(
-                    "● ",
-                    Style::default().fg(Color::Green),
-                ),
+                Span::styled("● ", Style::default().fg(Color::Green)),
                 Span::styled(port_str, name_style.add_modifier(Modifier::BOLD)),
                 Span::styled(process, name_style),
                 Span::styled(

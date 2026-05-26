@@ -111,20 +111,18 @@ fn parse_process_info(field: &str) -> (Option<u32>, String) {
     }
 
     let inner = &field[6..]; // strip "users:"
-    // Find first process entry: ("name",pid=N,...)
+                             // Find first process entry: ("name",pid=N,...)
     if let Some(start) = inner.find("(\"") {
         let rest = &inner[start + 2..];
         let name = rest.split('"').next().unwrap_or("unknown").to_string();
 
-        let pid = rest
-            .find("pid=")
-            .and_then(|i| {
-                let after = &rest[i + 4..];
-                after
-                    .split(|c: char| !c.is_ascii_digit())
-                    .next()
-                    .and_then(|s| s.parse::<u32>().ok())
-            });
+        let pid = rest.find("pid=").and_then(|i| {
+            let after = &rest[i + 4..];
+            after
+                .split(|c: char| !c.is_ascii_digit())
+                .next()
+                .and_then(|s| s.parse::<u32>().ok())
+        });
 
         (pid, name)
     } else {
